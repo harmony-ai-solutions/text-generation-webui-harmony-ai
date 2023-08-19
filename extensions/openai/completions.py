@@ -19,7 +19,8 @@ from modules.chat import (
     generate_chat_prompt,
     generate_chat_reply,
     load_character_memoized,
-    load_instruction_template_memoized
+    load_instruction_template_memoized,
+    save_history
 )
 from modules.presets import load_preset_memoized
 from modules.text_generation import (
@@ -214,6 +215,37 @@ def convert_history(history):
     return user_input, system_message, {'internal': chat_dialogue, 'visible': copy.deepcopy(chat_dialogue)}
 
 
+def decode_history(history):
+    '''
+    Chat histories in this program are in the format [message, reply].
+    This function converts that format to OpenAI histories.
+    '''
+    openai_history = []
+
+    for message in history['internal']:
+        user_message, assistant_message = message
+
+        # Handling User Message
+        if user_message:
+            if user_message.startswith('<img src="data:image/jpeg;base64,'):
+                # Extract base64 string and convert back to an image URL format
+                base64_string = user_message[33:-2]  # Exclude the '<img src="data:image/jpeg;base64,' and '">'
+                img_data = base64.b64decode(base64_string)
+                img = Image.open(BytesIO(img_data))
+                buffered = BytesIO()
+                img.save(buffered, format="JPEG")
+                img_url = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
+                openai_history.append({"role": "user", "content": [{"type": "image_url", "image_url": {"url": img_url}}]})
+            else:
+                openai_history.append({"role": "user", "content": user_message})
+
+        # Handling Assistant Message
+        if assistant_message:
+            openai_history.append({"role": "assistant", "content": assistant_message})
+
+    return openai_history
+
+
 def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, prompt_only=False) -> dict:
     if body.get('functions', []):
         raise InvalidRequestError(message="functions is not supported.", param='functions')
@@ -266,6 +298,7 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, p
     context = body['context'] or context
     greeting = body['greeting'] or greeting
     user_bio = body['user_bio'] or ''
+    do_save_history = body['save_history'] or False
 
     # History
     user_input, custom_system_message, history = convert_history(messages)
@@ -361,6 +394,9 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, p
 
         yield chunk
     else:
+        if do_save_history:
+            save_history(answer, character, generate_params['mode'])
+
         resp = {
             "id": cmpl_id,
             "object": object_type,
