@@ -25,7 +25,7 @@ from extensions.openai.errors import ServiceUnavailableError
 from extensions.openai.tokens import token_count, token_decode, token_encode
 from extensions.openai.utils import _start_cloudflared
 from modules import shared
-from modules.chat import load_latest_history
+from modules.chat import load_latest_history_with_unique_id
 from modules.logging_colors import logger
 from modules.models import unload_model
 from modules.text_generation import stop_everything_event
@@ -118,7 +118,7 @@ app.add_middleware(
 )
 
 
-@app.options("/", dependencies=check_key)
+@app.options("/", dependencies=check_key_or_harmony_key)
 async def options_route():
     return JSONResponse(content="OK")
 
@@ -198,9 +198,10 @@ async def handle_get_history(request: Request, character: str = None):
     # Build State for requesting history
     state = {
         'mode': 'chat',
-        'character_menu': character
+        'character_menu': character,
+        'name1': shared.settings['name1']
     }
-    history = load_latest_history(state)
+    history, unique_id = load_latest_history_with_unique_id(state)
 
     # Send Event to Monitoring
     harmony_api_key = request.headers.get('Api-Key')
@@ -211,7 +212,12 @@ async def handle_get_history(request: Request, character: str = None):
             client_ip = client_source_ip
         register_event(api_key=harmony_api_key, event_name=path, client_ip=client_ip)
 
-    response = OAIcompletions.decode_history(history)
+    response = {
+        'unique_id': unique_id,
+        'history': OAIcompletions.decode_history(history),
+        'user_name': shared.settings['name1'],
+        'character_name': character
+    }
     return JSONResponse(response)
 
 
