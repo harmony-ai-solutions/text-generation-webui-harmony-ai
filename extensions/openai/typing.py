@@ -116,6 +116,9 @@ class ChatCompletionRequestParams(BaseModel):
 
     continue_: bool = Field(default=False, description="Makes the last bot message in the history be continued instead of starting a new message.")
 
+    save_history: bool | None = Field(default=False, description="Whether to save the user message and generated conversation to the conversation history.")
+    unique_id: str | None = Field(default=None, description="The unique_id of the history to save.")
+
 
 class ChatCompletionRequest(GenerationOptions, ChatCompletionRequestParams):
     pass
