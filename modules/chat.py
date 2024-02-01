@@ -506,6 +506,22 @@ def start_new_chat(state):
     return history
 
 
+def start_new_chat_with_unique_id(state):
+    mode = state['mode']
+    history = {'internal': [], 'visible': []}
+
+    if mode != 'instruct':
+        greeting = replace_character_names(state['greeting'], state['name1'], state['name2'])
+        if greeting != '':
+            history['internal'] += [['<|BEGIN-VISIBLE-CHAT|>', greeting]]
+            history['visible'] += [['', apply_extensions('output', greeting, state, is_chat=True)]]
+
+    unique_id = datetime.now().strftime('%Y%m%d-%H-%M-%S')
+    save_history(history, unique_id, state['character_menu'], state['mode'])
+
+    return history, unique_id
+
+
 def get_history_file_path(unique_id, character, mode):
     if mode == 'instruct':
         p = Path(f'logs/instruct/{unique_id}.json')
@@ -634,6 +650,26 @@ def load_latest_history(state):
     return history
 
 
+def load_latest_history_with_unique_id(state):
+    '''
+    Loads the latest history for the given character in chat or chat-instruct
+    mode, or the latest instruct history for instruct mode.
+    Also returns the unique_id of the chat history along with the history.
+    '''
+
+    if shared.args.multi_user:
+        return start_new_chat_with_unique_id(state)
+
+    histories = find_all_histories(state)
+
+    if len(histories) > 0:
+        history, unique_id = load_history_with_unique_id(histories[0], state['character_menu'], state['mode'])
+    else:
+        history, unique_id = start_new_chat_with_unique_id(state)
+
+    return history, unique_id
+
+
 def load_history_after_deletion(state, idx):
     '''
     Loads the latest history for the given character in chat or chat-instruct
@@ -676,6 +712,21 @@ def load_history(unique_id, character, mode):
         }
 
     return history
+
+
+def load_history_with_unique_id(unique_id, character, mode):
+    p = get_history_file_path(unique_id, character, mode)
+
+    f = json.loads(open(p, 'rb').read())
+    if 'internal' in f and 'visible' in f:
+        history = f
+    else:
+        history = {
+            'internal': f['data'],
+            'visible': f['data_visible']
+        }
+
+    return history, unique_id
 
 
 def load_history_json(file, history):
