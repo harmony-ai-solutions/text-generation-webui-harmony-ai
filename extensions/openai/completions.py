@@ -294,6 +294,7 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False) -
     context = body['context'] or context
     greeting = body['greeting'] or greeting
     do_save_history = body['save_history'] or False
+    unique_id = body['unique_id'] or None
 
     # History
     user_input, custom_system_message, history = convert_history(messages)
@@ -387,8 +388,12 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False) -
 
         yield chunk
     else:
-        if do_save_history:
-            save_history(answer, character, generate_params['mode'])
+        if do_save_history and unique_id:
+            # Add Message to list of previous messages and convert to internal history format
+            messages.append({"role": "assistant", "content": answer})
+            _, _, history = convert_history(messages)
+            # Save
+            save_history(history, unique_id, character, generate_params['mode'])
 
         resp = {
             "id": cmpl_id,
