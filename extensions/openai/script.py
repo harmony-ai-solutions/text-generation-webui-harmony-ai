@@ -299,13 +299,13 @@ async def handle_embeddings(request: Request, request_data: EmbeddingsRequest):
     path = request.url.path
 
     # Send Event to Monitoring
-    harmony_api_key = request.headers.get('Api-Key')
-    if harmony_api_key:
-        client_ip = request.client.host
-        client_source_ip = request.headers.get("X-Real-Ip")
-        if client_source_ip:
-            client_ip = client_source_ip
-        register_event(api_key=harmony_api_key, event_name=path, client_ip=client_ip)
+    # harmony_api_key = request.headers.get('Api-Key')
+    # if harmony_api_key:
+    #     client_ip = request.client.host
+    #     client_source_ip = request.headers.get("X-Real-Ip")
+    #     if client_source_ip:
+    #         client_ip = client_source_ip
+    #     register_event(api_key=harmony_api_key, event_name=path, client_ip=client_ip)
 
     if type(input) is str:
         input = [input]
