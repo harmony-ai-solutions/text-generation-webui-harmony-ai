@@ -122,6 +122,12 @@ app.add_middleware(
 async def options_route():
     return JSONResponse(content="OK")
 
+@app.get("/health")
+async def health_check():
+    # This is a simple health check without any actual testing going on.
+    # As long as the API server is running, this will return true.
+    return JSONResponse(content="OK")
+
 
 @app.post('/v1/completions', response_model=CompletionResponse, dependencies=check_key_or_harmony_key)
 async def openai_completions(request: Request, request_data: CompletionRequest):
