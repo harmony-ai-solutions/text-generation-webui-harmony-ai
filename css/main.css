@@ -2,7 +2,7 @@
     --darker-gray: #202123;
     --dark-gray: #343541;
     --light-gray: #444654;
-    --light-theme-gray: #f4f4f4;
+    --light-theme-gray: #f5f5f5;
     --border-color-dark: #525252;
     --header-width: 112px;
     --selected-item-color-dark: #32333e;
@@ -249,8 +249,8 @@ button {
 }
 
 .pretty_scrollbar::-webkit-scrollbar {
-    width: 7px;
-    height: 7px;
+    width: 8px;
+    height: 8px;
 }
 
 .pretty_scrollbar::-webkit-scrollbar-track {
@@ -295,7 +295,7 @@ audio {
     width: 0;
     text-align: left;
     direction: rtl;
-    right: 5px;
+    right: 13px;
 }
 
 #default-token-counter {
@@ -1142,7 +1142,6 @@ div.svelte-362y77>*, div.svelte-362y77>.form>* {
 }
 
 .dark svg {
-    fill: white;
     color: white;
 }
 
@@ -1164,7 +1163,7 @@ div.svelte-362y77>*, div.svelte-362y77>.form>* {
 }
 
 .header_bar button.selected {
-    background: white;
+    background: #E0E0E0;
 }
 
 #chat-controls,
@@ -1220,4 +1219,75 @@ div.svelte-362y77>*, div.svelte-362y77>.form>* {
     #chat-controls-toggle.chat-controls-open {
         background: var(--light-theme-gray);
     }
+}
+
+/* ----------------------------------------------
+  Copy button for chat messages
+---------------------------------------------- */
+.message .text,
+.message .text-you,
+.message .text-bot,
+.user-message .text,
+.assistant-message .text {
+    position: relative;
+}
+
+.message, .user-message, .assistant-message {
+    position: relative;
+}
+
+.footer-button {
+    position: absolute;
+    padding: 0;
+    margin: 0;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    opacity: 0;
+    display: flex;
+    align-items: center;
+    transition: opacity 0.2s;
+}
+
+.footer-button.footer-copy-button {
+    bottom: -23px;
+    left: 0;
+}
+
+.footer-button.footer-refresh-button {
+    bottom: -23px;
+    left: 25px;
+}
+
+.footer-button.footer-continue-button {
+    bottom: -23px;
+    left: 50px;
+}
+
+.footer-button.footer-remove-button {
+    bottom: -23px;
+    left: 75px;
+}
+
+.message:hover .footer-button,
+.user-message:hover .footer-button,
+.assistant-message:hover .footer-button {
+    opacity: 1;
+}
+
+.footer-button svg {
+    stroke: rgb(156 163 175);
+    transition: stroke 0.2s;
+}
+
+.footer-button:hover svg {
+    stroke: rgb(107 114 128);
+}
+
+.dark .footer-button svg {
+    stroke: rgb(156 163 175);
+}
+
+.dark .footer-button:hover svg {
+    stroke: rgb(209 213 219);
 }
