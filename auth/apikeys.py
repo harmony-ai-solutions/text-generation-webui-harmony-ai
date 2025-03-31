@@ -6,8 +6,8 @@ import time
 import logging
 
 # Get values from environment variables
-ENDPOINT_URL = os.environ.get("ENDPOINT_URL")
-HARMONY_API_KEY = os.environ.get("HARMONY_API_KEY")
+ENDPOINT_URL = os.environ.get("ENDPOINT_URL") or ""
+HARMONY_API_KEY = os.environ.get("HARMONY_API_KEY") or ""
 
 # Errors
 ERROR_API_KEY_INVALID = 'error_api_key_invalid'
