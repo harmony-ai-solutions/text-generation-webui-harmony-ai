@@ -1,19 +1,14 @@
-import base64
 import copy
-import re
+import json
 import time
 from collections import deque
-from io import BytesIO
 
-import requests
 import tiktoken
-import torch
-import torch.nn.functional as F
-from PIL import Image
-from transformers import LogitsProcessor, LogitsProcessorList
+from pydantic import ValidationError
 
 from extensions.openai.errors import InvalidRequestError
-from extensions.openai.utils import debug_msg
+from extensions.openai.typing import ToolDefinition
+from extensions.openai.utils import debug_msg, getToolCallId, parseToolCall
 from modules import shared
 from modules.chat import (
     generate_chat_prompt,
@@ -22,55 +17,10 @@ from modules.chat import (
     load_instruction_template_memoized,
     save_history
 )
+from modules.image_utils import convert_openai_messages_to_images
+from modules.logging_colors import logger
 from modules.presets import load_preset_memoized
-from modules.text_generation import (
-    decode,
-    encode,
-    generate_reply,
-    get_reply_from_output_ids
-)
-
-
-class LogitsBiasProcessor(LogitsProcessor):
-    def __init__(self, logit_bias={}):
-        self.logit_bias = logit_bias
-        if self.logit_bias:
-            self.keys = list([int(key) for key in self.logit_bias.keys()])
-            values = [self.logit_bias[str(key)] for key in self.keys]
-            self.values = torch.tensor(values, dtype=torch.float, device=shared.model.device)
-            debug_msg(f"{self})")
-
-    def __call__(self, input_ids: torch.LongTensor, logits: torch.FloatTensor) -> torch.FloatTensor:
-        if self.logit_bias:
-            debug_msg(logits[0, self.keys], " + ", self.values)
-            logits[0, self.keys] += self.values
-            debug_msg(" --> ", logits[0, self.keys])
-            debug_msg(" max/min ", float(torch.max(logits[0])), float(torch.min(logits[0])))
-
-        return logits
-
-    def __repr__(self):
-        return f"<{self.__class__.__name__}(logit_bias={self.logit_bias})>"
-
-
-class LogprobProcessor(LogitsProcessor):
-    def __init__(self, logprobs=None):
-        self.logprobs = logprobs
-        self.token_alternatives = {}
-
-    def __call__(self, input_ids: torch.LongTensor, logits: torch.FloatTensor) -> torch.FloatTensor:
-        if self.logprobs is not None:  # 0-5
-            log_e_probabilities = F.log_softmax(logits, dim=1)
-            top_values, top_indices = torch.topk(log_e_probabilities, k=self.logprobs + 1)
-            top_tokens = [get_reply_from_output_ids([tok]) for tok in top_indices[0]]
-            top_probs = [float(x) for x in top_values[0]]
-            self.token_alternatives = dict(zip(top_tokens, top_probs))
-            debug_msg(repr(self))
-
-        return logits
-
-    def __repr__(self):
-        return f"<{self.__class__.__name__}(logprobs={self.logprobs}, token_alternatives={self.token_alternatives})>"
+from modules.text_generation import decode, encode, generate_reply
 
 
 def convert_logprobs_to_tiktoken(model, logprobs):
@@ -108,23 +58,58 @@ def process_parameters(body, is_legacy=False):
         elif isinstance(body['stop'], list):
             generate_params['custom_stopping_strings'] = body['stop']
 
-    logits_processor = []
-    logit_bias = body.get('logit_bias', None)
-    if logit_bias:  # {str: float, ...}
-        logits_processor = [LogitsBiasProcessor(logit_bias)]
+    if shared.args.loader != 'llama.cpp':
+        from transformers import LogitsProcessorList
 
-    logprobs = None  # coming to chat eventually
-    if 'logprobs' in body:
-        logprobs = body.get('logprobs', 0)  # maybe cap at topk? don't clamp 0-5.
-        generate_params['logprob_proc'] = LogprobProcessor(logprobs)
-        logits_processor.extend([generate_params['logprob_proc']])
-    else:
-        logprobs = None
+        from modules.transformers_loader import (
+            LogitsBiasProcessor,
+            LogprobProcessor
+        )
 
-    if logits_processor:  # requires logits_processor support
-        generate_params['logits_processor'] = LogitsProcessorList(logits_processor)
+        logits_processor = []
+        logit_bias = body.get('logit_bias', None)
+        if logit_bias:  # {str: float, ...}
+            logits_processor = [LogitsBiasProcessor(logit_bias)]
+
+        logprobs = None  # coming to chat eventually
+        if 'logprobs' in body:
+            logprobs = body.get('logprobs', 0)  # maybe cap at topk? don't clamp 0-5.
+            generate_params['logprob_proc'] = LogprobProcessor(logprobs)
+            logits_processor.extend([generate_params['logprob_proc']])
+        else:
+            logprobs = None
+
+        if logits_processor:  # requires logits_processor support
+            generate_params['logits_processor'] = LogitsProcessorList(logits_processor)
 
     return generate_params
+
+
+def process_multimodal_content(content):
+    """Extract text and add image placeholders from OpenAI multimodal format"""
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts = []
+        image_placeholders = ""
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+
+            item_type = item.get('type', '')
+            if item_type == 'text':
+                text_parts.append(item.get('text', ''))
+            elif item_type == 'image_url':
+                image_placeholders += "<__media__>"
+
+        final_text = ' '.join(text_parts)
+        if image_placeholders:
+            return f"{image_placeholders}\n\n{final_text}"
+        else:
+            return final_text
+
+    return str(content)
 
 
 def convert_history(history):
@@ -139,79 +124,46 @@ def convert_history(history):
     user_input_last = True
     system_message = ""
 
-    # Multimodal: convert OpenAI format to multimodal extension format
-    if any('content' in entry and isinstance(entry['content'], list) for entry in history):
-        new_history = []
-        for entry in history:
-            if isinstance(entry['content'], list):
-                for item in entry['content']:
-                    if not isinstance(item, dict):
-                        continue
-
-                    image_url = None
-                    content = None
-                    if item['type'] == 'image_url' and isinstance(item['image_url'], dict):
-                        image_url = item['image_url']['url']
-                    elif item['type'] == 'text' and isinstance(item['text'], str):
-                        content = item['text']
-                    if image_url:
-                        new_history.append({"image_url": image_url, "role": "user"})
-                    if content:
-                        new_history.append({"content": content, "role": "user"})
-            else:
-                new_history.append(entry)
-
-        history = new_history
-
     for entry in history:
-        if "image_url" in entry:
-            image_url = entry['image_url']
-            if "base64" in image_url:
-                image_url = re.sub('^data:image/.+;base64,', '', image_url)
-                img = Image.open(BytesIO(base64.b64decode(image_url)))
-            else:
-                try:
-                    my_res = requests.get(image_url)
-                    img = Image.open(BytesIO(my_res.content))
-                except Exception:
-                    raise 'Image cannot be loaded from the URL!'
-
-            buffered = BytesIO()
-            if img.mode in ("RGBA", "P"):
-                img = img.convert("RGB")
-
-            img.save(buffered, format="JPEG")
-            img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
-            content = f'<img src="data:image/jpeg;base64,{img_str}">'
-        else:
-            content = entry["content"]
-
+        content = entry["content"]
         role = entry["role"]
 
         if role == "user":
+            # Extract text content (images handled by model-specific code)
+            content = process_multimodal_content(content)
             user_input = content
             user_input_last = True
+
             if current_message:
-                chat_dialogue.append([current_message, ''])
+                chat_dialogue.append([current_message, '', ''])
                 current_message = ""
 
             current_message = content
         elif role == "assistant":
+            if "tool_calls" in entry and isinstance(entry["tool_calls"], list) and len(entry["tool_calls"]) > 0 and content.strip() == "":
+                continue  # skip tool calls
             current_reply = content
             user_input_last = False
             if current_message:
-                chat_dialogue.append([current_message, current_reply])
+                chat_dialogue.append([current_message, current_reply, ''])
                 current_message = ""
                 current_reply = ""
             else:
-                chat_dialogue.append(['', current_reply])
+                chat_dialogue.append(['', current_reply, ''])
+        elif role == "tool":
+            user_input_last = False
+            chat_dialogue.append(['', '', content])
         elif role == "system":
             system_message += f"\n{content}" if system_message else content
 
     if not user_input_last:
         user_input = ""
 
-    return user_input, system_message, {'internal': chat_dialogue, 'visible': copy.deepcopy(chat_dialogue)}
+    return user_input, system_message, {
+        'internal': chat_dialogue,
+        'visible': copy.deepcopy(chat_dialogue),
+        'messages': history  # Store original messages for multimodal models
+    }
 
 
 def decode_history(history):
@@ -255,6 +207,10 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, p
     if 'messages' not in body:
         raise InvalidRequestError(message="messages is required", param='messages')
 
+    tools = None
+    if 'tools' in body and body['tools'] is not None and isinstance(body['tools'], list) and len(body['tools']) > 0:
+        tools = validateTools(body['tools'])  # raises InvalidRequestError if validation fails
+
     messages = body['messages']
     for m in messages:
         if 'role' not in m:
@@ -262,8 +218,22 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, p
         elif m['role'] == 'function':
             raise InvalidRequestError(message="role: function is not supported.", param='messages')
 
-        if 'content' not in m and "image_url" not in m:
+        # Handle multimodal content validation
+        content = m.get('content')
+        if content is None:
             raise InvalidRequestError(message="messages: missing content", param='messages')
+
+        # Validate multimodal content structure
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict) or 'type' not in item:
+                    raise InvalidRequestError(message="messages: invalid content item format", param='messages')
+                if item['type'] not in ['text', 'image_url']:
+                    raise InvalidRequestError(message="messages: unsupported content type", param='messages')
+                if item['type'] == 'text' and 'text' not in item:
+                    raise InvalidRequestError(message="messages: missing text in content item", param='messages')
+                if item['type'] == 'image_url' and ('image_url' not in item or 'url' not in item['image_url']):
+                    raise InvalidRequestError(message="messages: missing image_url in content item", param='messages')
 
     # Chat Completions
     object_type = 'chat.completion' if not stream else 'chat.completion.chunk'
@@ -314,6 +284,7 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, p
         'custom_system_message': custom_system_message,
         'chat_template_str': chat_template_str,
         'chat-instruct_command': chat_instruct_command,
+        'tools': tools,
         'history': history,
         'stream': stream
     })
@@ -326,7 +297,7 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, p
     requested_model = generate_params.pop('model')
     logprob_proc = generate_params.pop('logprob_proc', None)
 
-    def chat_streaming_chunk(content):
+    def chat_streaming_chunk(content, chunk_tool_calls=None):
         # begin streaming
         chunk = {
             "id": cmpl_id,
@@ -336,7 +307,7 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, p
             resp_list: [{
                 "index": 0,
                 "finish_reason": None,
-                "delta": {'role': 'assistant', 'content': content},
+                "delta": {'role': 'assistant', 'content': content, 'tool_calls': chunk_tool_calls},
             }],
         }
 
@@ -345,6 +316,7 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, p
             chunk[resp_list][0]["logprobs"] = {'top_logprobs': [top_logprobs]}
         # else:
         #    chunk[resp_list][0]["logprobs"] = None
+
         return chunk
 
     # generate reply #######################################
@@ -352,8 +324,6 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, p
     if prompt_only:
         yield {'prompt': prompt}
         return
-
-    debug_msg({'prompt': prompt, 'generate_params': generate_params})
 
     if stream:
         yield chat_streaming_chunk('')
@@ -364,8 +334,23 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, p
     answer = ''
     seen_content = ''
 
+    tool_calls = []
+    end_last_tool_call = 0
+    supported_tools = [x["function"]["name"] for x in tools] if tools is not None else None
+
     for a in generator:
         answer = a['internal'][-1][1]
+
+        if supported_tools is not None:
+            tool_call = parseToolCall(answer[end_last_tool_call:], supported_tools) if len(answer) > 0 else []
+            if len(tool_call) > 0:
+                for tc in tool_call:
+                    tc["id"] = getToolCallId()
+                    tc["index"] = str(len(tool_calls))
+                    tc["function"]["arguments"] = json.dumps(tc["function"]["arguments"])
+                    tool_calls.append(tc)
+                end_last_tool_call = len(answer)
+
         if stream:
             len_seen = len(seen_content)
             new_content = answer[len_seen:]
@@ -373,18 +358,25 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, p
             if not new_content or chr(0xfffd) in new_content:  # partial unicode character, don't send it yet.
                 continue
 
-            seen_content = answer
             chunk = chat_streaming_chunk(new_content)
+
+            seen_content = answer
             yield chunk
+
+        # stop generation if tool_calls were generated previously
+        if len(tool_calls) > 0:
+            break
 
     token_count = len(encode(prompt)[0])
     completion_token_count = len(encode(answer)[0])
     stop_reason = "stop"
+    if len(tool_calls) > 0:
+        stop_reason = "tool_calls"
     if token_count + completion_token_count >= generate_params['truncation_length'] or completion_token_count >= generate_params['max_new_tokens']:
         stop_reason = "length"
 
     if stream:
-        chunk = chat_streaming_chunk('')
+        chunk = chat_streaming_chunk('', tool_calls)
         chunk[resp_list][0]['finish_reason'] = stop_reason
         chunk['usage'] = {
             "prompt_tokens": token_count,
@@ -409,7 +401,8 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False, p
             resp_list: [{
                 "index": 0,
                 "finish_reason": stop_reason,
-                "message": {"role": "assistant", "content": answer}
+                "message": {"role": "assistant", "content": answer},
+                "tool_calls": tool_calls
             }],
             "usage": {
                 "prompt_tokens": token_count,
@@ -434,9 +427,26 @@ def completions_common(body: dict, is_legacy: bool = False, stream=False):
 
     prompt_str = 'context' if is_legacy else 'prompt'
 
-    # ... encoded as a string, array of strings, array of tokens, or array of token arrays.
-    if prompt_str not in body:
-        raise InvalidRequestError("Missing required input", param=prompt_str)
+    # Handle both prompt and messages format for unified multimodal support
+    if prompt_str not in body or body[prompt_str] is None:
+        if 'messages' in body:
+            # Convert messages format to prompt for completions endpoint
+            prompt_text = ""
+            for message in body.get('messages', []):
+                if isinstance(message, dict) and 'content' in message:
+                    # Extract text content from multimodal messages
+                    content = message['content']
+                    if isinstance(content, str):
+                        prompt_text += content
+                    elif isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and item.get('type') == 'text':
+                                prompt_text += item.get('text', '')
+
+            # Allow empty prompts for image-only requests
+            body[prompt_str] = prompt_text
+        else:
+            raise InvalidRequestError("Missing required input", param=prompt_str)
 
     # common params
     generate_params = process_parameters(body, is_legacy=is_legacy)
@@ -447,9 +457,22 @@ def completions_common(body: dict, is_legacy: bool = False, stream=False):
     suffix = body['suffix'] if body['suffix'] else ''
     echo = body['echo']
 
+    # Add messages to generate_params if present for multimodal processing
+    if body.get('messages'):
+        generate_params['messages'] = body['messages']
+        raw_images = convert_openai_messages_to_images(generate_params['messages'])
+        if raw_images:
+            logger.info(f"Found {len(raw_images)} image(s) in request.")
+            generate_params['raw_images'] = raw_images
+
     if not stream:
         prompt_arg = body[prompt_str]
-        if isinstance(prompt_arg, str) or (isinstance(prompt_arg, list) and isinstance(prompt_arg[0], int)):
+
+        # Handle empty/None prompts (e.g., image-only requests)
+        if prompt_arg is None:
+            prompt_arg = ""
+
+        if isinstance(prompt_arg, str) or (isinstance(prompt_arg, list) and len(prompt_arg) > 0 and isinstance(prompt_arg[0], int)):
             prompt_arg = [prompt_arg]
 
         resp_list_data = []
@@ -457,7 +480,7 @@ def completions_common(body: dict, is_legacy: bool = False, stream=False):
         total_prompt_token_count = 0
 
         for idx, prompt in enumerate(prompt_arg, start=0):
-            if isinstance(prompt[0], int):
+            if isinstance(prompt, list) and len(prompt) > 0 and isinstance(prompt[0], int):
                 # token lists
                 if requested_model == shared.model_name:
                     prompt = decode(prompt)[0]
@@ -546,7 +569,6 @@ def completions_common(body: dict, is_legacy: bool = False, stream=False):
         # generate reply #######################################
         debug_msg({'prompt': prompt, 'generate_params': generate_params})
         generator = generate_reply(prompt, generate_params, is_chat=False)
-
         answer = ''
         seen_content = ''
         completion_token_count = 0
@@ -598,3 +620,19 @@ def completions(body: dict, is_legacy: bool = False) -> dict:
 def stream_completions(body: dict, is_legacy: bool = False):
     for resp in completions_common(body, is_legacy, stream=True):
         yield resp
+
+
+def validateTools(tools: list[dict]):
+    # Validate each tool definition in the JSON array
+    valid_tools = None
+    for idx in range(len(tools)):
+        tool = tools[idx]
+        try:
+            tool_definition = ToolDefinition(**tool)
+            if valid_tools is None:
+                valid_tools = []
+            valid_tools.append(tool)
+        except ValidationError:
+            raise InvalidRequestError(message=f"Invalid tool specification at index {idx}.", param='tools')
+
+    return valid_tools

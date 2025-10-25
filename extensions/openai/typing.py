@@ -1,12 +1,12 @@
 import json
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator, validator
 
 
 class GenerationOptions(BaseModel):
-    preset: str | None = Field(default=None, description="The name of a file under text-generation-webui/presets (without the .yaml extension). The sampling parameters that get overwritten by this option are the keys in the default_preset() function in modules/presets.py.")
+    preset: str | None = Field(default=None, description="The name of a file under text-generation-webui/user_data/presets (without the .yaml extension). The sampling parameters that get overwritten by this option are the keys in the default_preset() function in modules/presets.py.")
     dynatemp_low: float = 1
     dynatemp_high: float = 1
     dynatemp_exponent: float = 1
@@ -42,6 +42,8 @@ class GenerationOptions(BaseModel):
     auto_max_new_tokens: bool = False
     ban_eos_token: bool = False
     add_bos_token: bool = True
+    enable_thinking: bool = True
+    reasoning_effort: str = "medium"
     skip_special_tokens: bool = True
     static_cache: bool = False
     truncation_length: int = 0
@@ -53,15 +55,58 @@ class GenerationOptions(BaseModel):
     grammar_string: str = ""
 
 
+class ToolDefinition(BaseModel):
+    function: 'ToolFunction'
+    type: str
+
+
+class ToolFunction(BaseModel):
+    description: str
+    name: str
+    parameters: 'ToolParameters'
+
+
+class ToolParameters(BaseModel):
+    properties: Optional[Dict[str, 'ToolProperty']] = None
+    required: Optional[list[str]] = None
+    type: str
+    description: Optional[str] = None
+
+
+class ToolProperty(BaseModel):
+    description: Optional[str] = None
+    type: Optional[str] = None  # we are faced with definitions like anyOf, e.g. {'type': 'function', 'function': {'name': 'git_create_branch', 'description': 'Creates a new branch from an optional base branch', 'parameters': {'type': 'object', 'properties': {'repo_path': {'title': 'Repo Path', 'type': 'string'}, 'branch_name': {'title': 'Branch Name', 'type': 'string'}, 'base_branch': {'anyOf': [{'type': 'string'}, {'type': 'null'}], 'default': None, 'title': 'Base Branch'}}, 'required': ['repo_path', 'branch_name'], 'title': 'GitCreateBranch'}}}
+
+
+class FunctionCall(BaseModel):
+    name: str
+    arguments: Optional[str] = None
+    parameters: Optional[str] = None
+
+    @validator('arguments', allow_reuse=True)
+    def checkPropertyArgsOrParams(cls, v, values, **kwargs):
+        if not v and not values.get('parameters'):
+            raise ValueError("At least one of 'arguments' or 'parameters' must be provided as property in FunctionCall type")
+        return v
+
+
+class ToolCall(BaseModel):
+    id: str
+    index: int
+    type: str
+    function: FunctionCall
+
+
 class CompletionRequestParams(BaseModel):
     model: str | None = Field(default=None, description="Unused parameter. To change the model, use the /v1/internal/model/load endpoint.")
-    prompt: str | List[str]
+    prompt: str | List[str] | None = Field(default=None, description="Text prompt for completion. Can also use 'messages' format for multimodal.")
+    messages: List[dict] | None = Field(default=None, description="OpenAI messages format for multimodal support. Alternative to 'prompt'.")
     best_of: int | None = Field(default=1, description="Unused parameter.")
     echo: bool | None = False
     frequency_penalty: float | None = 0
     logit_bias: dict | None = None
     logprobs: int | None = None
-    max_tokens: int | None = 16
+    max_tokens: int | None = 512
     n: int | None = Field(default=1, description="Unused parameter.")
     presence_penalty: float | None = 0
     stop: str | List[str] | None = None
@@ -70,6 +115,12 @@ class CompletionRequestParams(BaseModel):
     temperature: float | None = 1
     top_p: float | None = 1
     user: str | None = Field(default=None, description="Unused parameter.")
+
+    @model_validator(mode='after')
+    def validate_prompt_or_messages(self):
+        if self.prompt is None and self.messages is None:
+            raise ValueError("Either 'prompt' or 'messages' must be provided")
+        return self
 
 
 class CompletionRequest(GenerationOptions, CompletionRequestParams):
@@ -91,6 +142,7 @@ class ChatCompletionRequestParams(BaseModel):
     frequency_penalty: float | None = 0
     function_call: str | dict | None = Field(default=None, description="Unused parameter.")
     functions: List[dict] | None = Field(default=None, description="Unused parameter.")
+    tools: List[dict] | None = Field(default=None, description="Tools signatures passed via MCP.")
     logit_bias: dict | None = None
     max_tokens: int | None = None
     n: int | None = Field(default=1, description="Unused parameter.")
@@ -103,10 +155,10 @@ class ChatCompletionRequestParams(BaseModel):
 
     mode: str = Field(default='instruct', description="Valid options: instruct, chat, chat-instruct.")
 
-    instruction_template: str | None = Field(default=None, description="An instruction template defined under text-generation-webui/instruction-templates. If not set, the correct template will be automatically obtained from the model metadata.")
+    instruction_template: str | None = Field(default=None, description="An instruction template defined under text-generation-webui/user_data/instruction-templates. If not set, the correct template will be automatically obtained from the model metadata.")
     instruction_template_str: str | None = Field(default=None, description="A Jinja2 instruction template. If set, will take precedence over everything else.")
 
-    character: str | None = Field(default=None, description="A character defined under text-generation-webui/characters. If not set, the default \"Assistant\" character will be used.")
+    character: str | None = Field(default=None, description="A character defined under text-generation-webui/user_data/characters. If not set, the default \"Assistant\" character will be used.")
     bot_name: str | None = Field(default=None, description="Overwrites the value set by character field.", alias="name2")
     context: str | None = Field(default=None, description="Overwrites the value set by character field.")
     greeting: str | None = Field(default=None, description="Overwrites the value set by character field.")
@@ -114,7 +166,7 @@ class ChatCompletionRequestParams(BaseModel):
     user_bio: str | None = Field(default=None, description="The user description/personality.")
     chat_template_str: str | None = Field(default=None, description="Jinja2 template for chat.")
 
-    chat_instruct_command: str | None = None
+    chat_instruct_command: str | None = "Continue the chat dialogue below. Write a single reply for the character \"<|character|>\".\n\n<|prompt|>"
 
     continue_: bool = Field(default=False, description="Makes the last bot message in the history be continued instead of starting a new message.")
 
@@ -178,7 +230,7 @@ class LogitsRequestParams(BaseModel):
     use_samplers: bool = False
     top_logits: int | None = 50
     frequency_penalty: float | None = 0
-    max_tokens: int | None = 16
+    max_tokens: int | None = 512
     presence_penalty: float | None = 0
     temperature: float | None = 1
     top_p: float | None = 1

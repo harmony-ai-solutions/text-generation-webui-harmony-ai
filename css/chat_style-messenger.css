@@ -1,5 +1,6 @@
 .message {
-    padding-bottom: 25px;
+    padding-bottom: 22px;
+    padding-top: 3px;
     font-size: 15px;
     font-family: 'Noto Sans', Helvetica, Arial, sans-serif;
     line-height: 1.428571429;
@@ -97,4 +98,12 @@
 
 .message-body p em {
     color: rgb(110 110 110) !important;
+}
+
+.editing-textarea {
+    width: max(30rem) !important;
+}
+
+.circle-you + .text .edit-control-button, .circle-you + .text .editing-textarea {
+    color: #000 !important;
 }

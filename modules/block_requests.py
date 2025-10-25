@@ -1,5 +1,6 @@
 import builtins
 import io
+import re
 
 import requests
 
@@ -37,7 +38,6 @@ def my_get(url, **kwargs):
     return requests.api.request('get', 'http://127.0.0.1/', **kwargs)
 
 
-# Kindly provided by our friend WizardLM-30B
 def my_open(*args, **kwargs):
     filename = str(args[0])
     if filename.endswith(('index.html', 'share.html')):
@@ -51,6 +51,11 @@ def my_open(*args, **kwargs):
         file_contents = file_contents.replace('cdnjs.cloudflare.com', '127.0.0.1')
         file_contents = file_contents.replace(
             '</head>',
+            '\n    <link rel="preload" href="file/css/Inter/Inter-VariableFont_opsz,wght.ttf" as="font" type="font/ttf" crossorigin>'
+            '\n    <link rel="preload" href="file/css/Inter/Inter-Italic-VariableFont_opsz,wght.ttf" as="font" type="font/ttf" crossorigin>'
+            '\n    <link rel="preload" href="file/css/NotoSans/NotoSans-Medium.woff2" as="font" type="font/woff2" crossorigin>'
+            '\n    <link rel="preload" href="file/css/NotoSans/NotoSans-MediumItalic.woff2" as="font" type="font/woff2" crossorigin>'
+            '\n    <link rel="preload" href="file/css/NotoSans/NotoSans-Bold.woff2" as="font" type="font/woff2" crossorigin>'
             '\n    <script src="file/js/katex/katex.min.js"></script>'
             '\n    <script src="file/js/katex/auto-render.min.js"></script>'
             '\n    <script src="file/js/highlightjs/highlight.min.js"></script>'
@@ -60,6 +65,13 @@ def my_open(*args, **kwargs):
             '\n    <script>hljs.addPlugin(new CopyButtonPlugin());</script>'
             f'\n    <script>{ui.global_scope_js}</script>'
             '\n  </head>'
+        )
+
+        file_contents = re.sub(
+            r'@media \(prefers-color-scheme: dark\) \{\s*body \{([^}]*)\}\s*\}',
+            r'body.dark {\1}',
+            file_contents,
+            flags=re.DOTALL
         )
 
         if len(args) > 1 and args[1] == 'rb':
