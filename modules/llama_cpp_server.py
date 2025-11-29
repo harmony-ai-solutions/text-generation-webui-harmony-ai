@@ -317,6 +317,7 @@ class LlamaServer:
             "--ctx-size", str(shared.args.ctx_size),
             "--gpu-layers", str(shared.args.gpu_layers),
             "--batch-size", str(shared.args.batch_size),
+            "--ubatch-size", str(shared.args.ubatch_size),
             "--port", str(self.port),
             "--no-webui",
             "--flash-attn", "on",
@@ -326,6 +327,8 @@ class LlamaServer:
             cmd += ["--threads", str(shared.args.threads)]
         if shared.args.threads_batch > 0:
             cmd += ["--threads-batch", str(shared.args.threads_batch)]
+        if shared.args.cpu_moe:
+            cmd.append("--cpu-moe")
         if shared.args.no_mmap:
             cmd.append("--no-mmap")
         if shared.args.mlock:
