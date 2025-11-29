@@ -147,6 +147,76 @@ jobs:
             ${{ secrets.DOCKER_HUB_USERNAME }}/text-generation-webui-harmony-ai-nvidia:${{ github.ref_name }}
             ${{ secrets.DOCKER_HUB_USERNAME }}/text-generation-webui-harmony-ai-nvidia:latest
 
+  build-and-push-amd-wsl:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Frees up additional disk space on GHA runner for building the image
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          temp-reserve-mb: 100
+          swap-size-mb: 1024
+          remove-dotnet: 'true'
+          remove-docker-images: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Relocate Docker data-root into workspace
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="${{ github.workspace }}/.docker-root"
+          sudo mkdir -p "$ROOT"
+          sudo systemctl stop docker || sudo service docker stop || sudo pkill -9 dockerd || true
+          if [ -d /var/lib/docker ] && [ ! -L /var/lib/docker ]; then
+            sudo rsync -aH /var/lib/docker/ "$ROOT"/ || true
+            sudo rm -rf /var/lib/docker
+          fi
+          sudo mkdir -p /var/lib/docker
+          sudo mount --bind "$ROOT" /var/lib/docker
+          sudo systemctl start docker || sudo service docker start || true
+          docker info | grep -i "Docker Root Dir" || true
+          df -h /var/lib/docker || true
+
+      - name: Redirect build caches into workspace
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "${{ github.workspace }}/.caches"/{npm,pip,ccache,cargo,buildx}
+          {
+            echo "PIP_CACHE_DIR=${{ github.workspace }}/.caches/pip"
+            echo "PIP_NO_INPUT=1"
+            echo "NPM_CONFIG_CACHE=${{ github.workspace }}/.caches/npm"
+            echo "CCACHE_DIR=${{ github.workspace }}/.caches/ccache"
+            echo "CARGO_HOME=${{ github.workspace }}/.caches/cargo"
+            echo "DOCKER_BUILDKIT=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log in to Docker registry
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+
+      - name: Build and push text-generation-webui-harmony-ai image for AMD WSL2
+        uses: docker/build-push-action@v3
+        with:
+          context: ./docker/amd-wsl
+          file: ./docker/amd-wsl/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_HUB_USERNAME }}/text-generation-webui-harmony-ai-amd-wsl:${{ github.ref_name }}
+            ${{ secrets.DOCKER_HUB_USERNAME }}/text-generation-webui-harmony-ai-amd-wsl:latest
+
 #  build-and-push-tensorrt:
 #    runs-on: ubuntu-latest
 #
